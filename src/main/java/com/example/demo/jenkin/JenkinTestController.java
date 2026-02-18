@@ -12,7 +12,7 @@ public class JenkinTestController {
 	@GetMapping("/hello")
 	public String display() {
 		
-		return "Hello Welcome to Jenkins";
+		return "Hello Welcome to Jenkins !!";
 	}
 	
 }
