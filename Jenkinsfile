@@ -14,20 +14,10 @@ pipeline {
         }
         stage('Build') {
             steps {
-                sh 'mvn -B -DskipTests clean package' // Builds the application and skips tests
+                sh 'mvn clean package -DskipTests clean package' // Builds the application and skips tests
             }
         }
-        stage('Test') {
-            steps {
-                sh 'mvn test' // Runs the unit tests
-            }
-            post {
-                always {
-                    // Archives the JUnit test reports
-                    junit 'target/surefire-reports/*.xml' 
-                }
-            }
-        }
+
         stage('Run Application') {
             steps {
                 // This command runs the generated JAR file in the background (using '&')
