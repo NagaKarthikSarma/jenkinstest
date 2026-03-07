@@ -1,5 +1,5 @@
 pipeline {
-    agent { label 'windows' } // Ensure you have a Windows agent with this label
+    agent any // Ensure you have a Windows agent with this label
 
     // Uncomment if you configured Maven/JDK in Global Tool Configuration:
     // tools {
