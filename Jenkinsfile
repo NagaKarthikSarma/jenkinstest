@@ -1,36 +1,52 @@
 pipeline {
-    agent any // Specifies that the pipeline can run on any available agent, including a Windows machine
+    agent { label 'windows' } // Ensure you have a Windows agent with this label
+
+    // Uncomment if you configured Maven/JDK in Global Tool Configuration:
     // tools {
-    //     // Ensure you configure these tool names in Manage Jenkins > Global Tool Configuration
-    //     maven 'Maven 3.x' 
-    //     jdk 'JDK 17' 
+    //     maven 'Maven 3.x'
+    //     jdk   'JDK 17'
     // }
+
     stages {
         stage('Checkout Code') {
             steps {
-                // Fetches the code from the specified GitHub repository
-                git url: 'https://github.com/NagaKarthikSarma/jenkinstest.git', 
-                    branch: 'main' // Replace 'main' with your target branch
+                git url: 'https://github.com/NagaKarthikSarma/jenkinstest.git', branch: 'main'
             }
         }
 
         stage('Build Project') {
             steps {
-                // Runs Maven clean package command to build the JAR file
-                bat 'mvn clean package -DskipTests' //
+                // If Maven is not on PATH, configure "tools" above or call it via full path.
+                bat 'mvn -v'
+                bat 'mvn clean package -DskipTests'
             }
         }
 
-        stage('Run Application in New Window') {
+        stage('Run Application in New Window (Detached)') {
             steps {
-                // Finds the generated JAR file path dynamically
-                script {
-                    def jarFile = findFiles(glob: 'target/*.jar')[0].path
-                    // Launches the application in a new, detached CMD window on Windows
-                    // The 'start cmd /k' command opens a new window and keeps it open (/k) after running the command
-                    bat "start \"SpringBoot App\" cmd /k java -jar %WORKSPACE%\\\\${jarFile}"
-                }
+                // Batch finds the first JAR under target and stores in JARFILE env var
+                bat '''
+                    setlocal enabledelayedexpansion
+                    for /f "delims=" %%F in ('dir /b /a:-d target\\*.jar') do (
+                        set JARFILE=%%F
+                        goto :found
+                    )
+                    echo No JAR found in target\\
+                    exit /b 1
+                    :found
+                    echo Found JAR: %JARFILE%
+
+                    rem Use PowerShell to start the process detached (no console kept open)
+                    powershell -NoProfile -Command ^
+                      "Start-Process -FilePath 'java' -ArgumentList '-jar \"'%WORKSPACE%\\target\\%JARFILE%'\"' -WindowStyle Hidden"
+                '''
             }
+        }
+    }
+
+    post {
+        failure {
+            echo 'Build failed. Check the console log for details.'
         }
     }
 }
