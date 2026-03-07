@@ -1,32 +1,35 @@
 pipeline {
-    // Use a Windows-based agent. Ensure your Jenkins agent is configured as a Windows node.
-    agent any
-
+    agent any // Specifies that the pipeline can run on any available agent, including a Windows machine
+    // tools {
+    //     // Ensure you configure these tool names in Manage Jenkins > Global Tool Configuration
+    //     maven 'Maven 3.x' 
+    //     jdk 'JDK 17' 
+    // }
     stages {
-        stage('Pull Code from GitHub') {
+        stage('Checkout Code') {
             steps {
-                // The git step automatically handles cloning the repository based on the job configuration.
-                git branch: 'main', url: 'https://github.com/NagaKarthikSarma/jenkinstest.git'
+                // Fetches the code from the specified GitHub repository
+                git url: 'https://github.com', 
+                    branch: 'main' // Replace 'main' with your target branch
             }
         }
 
-        stage('Build Spring Boot App') {
+        stage('Build Project') {
             steps {
-                // Use bat or powershell for Windows shell commands
-                // Run Maven clean install to build the project and generate the JAR file
-                bat 'mvn clean install -DskipTests'
+                // Runs Maven clean package command to build the JAR file
+                bat 'mvn clean package -DskipTests' //
             }
         }
 
-        stage('Run Application') {
+        stage('Run Application in New Window') {
             steps {
-                // Stop any previously running instance of the app (optional but recommended for redeployment)
-                // This is a basic example; proper service management might be needed for production
-                bat 'taskkill /F /IM java.exe || ECHO No running processes found'
-
-                // Run the Spring Boot JAR file
-                // The JAR file is typically located in the 'target' directory after the build stage
-                bat 'java -jar target/*.jar'
+                // Finds the generated JAR file path dynamically
+                script {
+                    def jarFile = findFiles(glob: 'target/*.jar')[0].path
+                    // Launches the application in a new, detached CMD window on Windows
+                    // The 'start cmd /k' command opens a new window and keeps it open (/k) after running the command
+                    bat "start \"SpringBoot App\" cmd /k java -jar %WORKSPACE%\\\\${jarFile}"
+                }
             }
         }
     }
