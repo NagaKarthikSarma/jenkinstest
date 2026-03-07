@@ -1,5 +1,5 @@
 pipeline {
-    agent { label 'windows' } // ensure this runs on a Windows agent
+    agent any // ensure this runs on a Windows agent
 
     options {
         timestamps()
