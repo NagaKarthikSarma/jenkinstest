@@ -18,8 +18,8 @@ pipeline {
         JAVA_EXE   = 'java'
         START_ARGS = '-Xms256m -Xmx512m'
         JAR_GLOB   = 'target\\*.jar'
-        HEALTH_URL = "http://localhost:8081
-        /"   // change to /actuator/health if you enable actuator
+        HEALTH_URL = "http://localhost:8081/"
+           // change to /actuator/health if you enable actuator
 
         // Derived paths
         WORKDIR    = "${env.WORKSPACE}"
