@@ -1,95 +1,91 @@
 pipeline {
-    agent any
-    // If you configured tools in Jenkins, you can uncomment and match their names:
-    // tools {
-    //   jdk 'jdk21'
-    //   maven 'maven3'
-    // }
+  agent any
 
-    stages {
-        stage('Pull Code from GitHub') {
-            steps {
-                // Pulls the code from the job's configured SCM
-                checkout scm
-            }
-        }
+  parameters {
+    // If your job is "Pipeline script from SCM", checkout scm is automatic — otherwise this REPO/BRANCH are unused.
+    string(name: 'REPO_URL', defaultValue: 'https://github.com/NagaKarthikSarma/jenkinstest.git', description: 'Repository URL (if using inline pipeline)')
+    string(name: 'BRANCH',    defaultValue: 'main', description: 'Branch (if using inline pipeline)')
+    booleanParam(name: 'SKIP_TESTS', defaultValue: true, description: 'Skip tests during build')
+    string(name: 'APP_PORT',  defaultValue: '8080', description: 'Spring Boot server.port')
+    string(name: 'HEALTH_PATH', defaultValue: '/', description: 'Health path (e.g., / or /actuator/health)')
+  }
 
-        stage('Build') {
-            steps {
-                script {
-                    // Use Maven Wrapper if present; fall back to mvn
-                    def skip = '-DskipTests'
-                    if (fileExists('mvnw.cmd')) {
-                        bat "mvnw -B -U clean package ${skip}"
-                    } else {
-                        bat "mvn -B -U clean package ${skip}"
-                    }
-                }
-            }
-        }
+  options {
+    timestamps()
+    ansiColor('xterm')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    timeout(time: 20, unit: 'MINUTES')
+  }
 
-        stage('Test') {
-            steps {
-                script {
-                    if (fileExists('mvnw.cmd')) {
-                        bat "mvnw -B test"
-                    } else {
-                        bat "mvn -B test"
-                    }
-                }
-            }
-            post {
-                always {
-                    // Publish JUnit test results if present
-                    junit 'target/surefire-reports/*.xml'
-                }
-            }
-        }
-
-        stage('Run Application') {
-            steps {
-                script {
-                    // Find the packaged JAR (exclude sources/javadoc)
-                    def jarPath = bat(
-                        returnStdout: true,
-                        script: """
-                          powershell -NoProfile -Command ^
-                            "(Get-ChildItem -Path 'target\\*.jar' -ErrorAction SilentlyContinue | `
-                              Where-Object { \$_ .Name -notmatch 'sources|javadoc' } | `
-                              Sort-Object LastWriteTime -Descending | `
-                              Select-Object -First 1).FullName"
-                        """
-                    ).trim()
-
-                    if (!jarPath) {
-                        error "No runnable JAR found in target/. Ensure Spring Boot builds a fat JAR."
-                    }
-
-                    echo "Starting: ${jarPath}"
-
-                    // Start Spring Boot app in background, redirect output to app.log, and capture PID
-                    bat """
-                      powershell -NoProfile -Command ^
-                        "\$log = Join-Path (Get-Location) 'app.log'; ^
-                         if (Test-Path \$log) { Remove-Item \$log -Force }; ^
-                         \$args = @('-jar','${jarPath.replace('\\','/')}'); ^
-                         \$p = Start-Process -FilePath 'java' -ArgumentList \$args -PassThru -WindowStyle Hidden -RedirectStandardOutput \$log -RedirectStandardError \$log; ^
-                         Set-Content -Path app.pid -Value \$p.Id; ^
-                         'Started PID: ' + \$p.Id | Out-File -FilePath \$log -Append"
-                    """
-
-                    // Optional: wait briefly and show last lines of the log
-                    bat "powershell -NoProfile -Command \"Start-Sleep -Seconds 5; Get-Content .\\app.log -Tail 60 -ErrorAction SilentlyContinue\""
-                }
-            }
-        }
+  stages {
+    stage('Checkout') {
+      steps {
+        deleteDir()
+        // If this pipeline comes from SCM (Jenkinsfile in repo), 'checkout scm' is not needed here,
+        // Jenkins already did "Declarative: Checkout SCM". If you run inline, uncomment the next line:
+        // git url: params.REPO_URL, branch: params.BRANCH
+      }
     }
 
-    post {
+    stage('Show Tool Versions') {
+      steps {
+        bat 'git --version || ver'
+        bat 'java -version || ver'
+        bat 'mvn -v || ver'
+      }
+    }
+
+    stage('Build') {
+      steps {
+        script {
+          def skip = params.SKIP_TESTS ? '-DskipTests' : ''
+          if (fileExists('mvnw.cmd')) {
+            bat "mvnw -B -U clean package ${skip}"
+          } else {
+            bat "mvn -B -U clean package ${skip}"
+          }
+        }
+      }
+    }
+
+    stage('Test') {
+      steps {
+        script {
+          if (fileExists('mvnw.cmd')) {
+            bat "mvnw -B test"
+          } else {
+            bat "mvn -B test"
+          }
+        }
+      }
+      post {
         always {
-            // Archive generated JAR(s)
-            archiveArtifacts artifacts: 'target\\*.jar', fingerprint: true
-            echo 'Pipeline finished.'
+          junit 'target/surefire-reports/*.xml'
         }
+      }
     }
+
+stage('Run Application') {
+  steps {
+    script {
+      def jarPath = bat(returnStdout: true, script: """
+        powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+          "$j = Get-ChildItem -Path 'target\\*.jar' | Where-Object { \$_.Name -notmatch 'sources|javadoc' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($j) { $j.FullName }"
+      """).trim()
+      if (!jarPath) { error "No runnable JAR found." }
+      bat "start /MIN cmd /c java -jar \"${jarPath}\" --server.port=${params.APP_PORT} > app.log 2>&1"
+      bat "powershell -NoProfile -Command \"Start-Sleep -Seconds 8; Get-Content .\\app.log -Tail 80 -ErrorAction SilentlyContinue\""
+    }
+  }
+}
+      
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'target\\*.jar', fingerprint: true
+      echo 'Pipeline finished.'
+    }
+  }
 }
