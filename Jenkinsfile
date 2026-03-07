@@ -14,11 +14,11 @@ pipeline {
         GIT_BRANCH = 'main'
 
         // App/runtime config (adjust if needed)
-        APP_PORT   = '8081'
+        APP_PORT   = '8080'
         JAVA_EXE   = 'java'
         START_ARGS = '-Xms256m -Xmx512m'
         JAR_GLOB   = 'target\\*.jar'
-        HEALTH_URL = "http://localhost:8081/"   // change to /actuator/health if you enable actuator
+        HEALTH_URL = "http://localhost:8080/"   // change to /actuator/health if you enable actuator
 
         // Derived paths
         WORKDIR    = "${env.WORKSPACE}"
@@ -46,7 +46,7 @@ pipeline {
             steps {
                 echo "Attempting to stop previously running app…"
 
-                // Stop via PID file if present
+                // Stop via PID file if present (ignore errors)
                 bat '''
                     setlocal
                     if exist "%PID_FILE%" (
@@ -59,11 +59,9 @@ pipeline {
                     endlocal
                 '''
 
-                // Fallback: stop whoever is listening on APP_PORT
+                // Fallback: stop whoever is listening on APP_PORT (always exit 0)
                 bat '''
-                    powershell -NoProfile -Command ^
-                      "$p = Get-NetTCPConnection -LocalPort $env:APP_PORT -ErrorAction SilentlyContinue | Select-Object -First 1; " ^
-                      "if($p -and $p.OwningProcess) { try { Stop-Process -Id $p.OwningProcess -Force -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {} }"
+                    powershell -NoProfile -Command "$p = Get-NetTCPConnection -LocalPort $env:APP_PORT -ErrorAction SilentlyContinue | Select-Object -First 1; if($p -and $p.OwningProcess) { try { Stop-Process -Id $p.OwningProcess -Force -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {} }; exit 0"
                 '''
             }
         }
