@@ -23,25 +23,38 @@ pipeline {
         }
 
         stage('Run Application in New Window (Detached)') {
-            steps {
-                // Batch finds the first JAR under target and stores in JARFILE env var
-                bat '''
-                    setlocal enabledelayedexpansion
-                    for /f "delims=" %%F in ('dir /b /a:-d target\\*.jar') do (
-                        set JARFILE=%%F
-                        goto :found
-                    )
-                    echo No JAR found in target\\
-                    exit /b 1
-                    :found
-                    echo Found JAR: %JARFILE%
+    steps {
+        bat '''
+            setlocal enabledelayedexpansion
 
-                    rem Use PowerShell to start the process detached (no console kept open)
-                    powershell -NoProfile -Command ^
-                      "Start-Process -FilePath 'java' -ArgumentList '-jar \"'%WORKSPACE%\\target\\%JARFILE%'\"' -WindowStyle Hidden"
-                '''
-            }
-        }
+            rem === Find the first JAR in target ===
+            set "JARFILE="
+            for /f "delims=" %%F in ('dir /b /a:-d target\\*.jar') do (
+                set "JARFILE=%%F"
+                goto :found
+            )
+
+            echo No JAR found in target\\
+            exit /b 1
+
+            :found
+            echo Found JAR: %JARFILE%
+
+            rem Build the full path safely (handles spaces)
+            set "JARPATH=%WORKSPACE%\\target\\%JARFILE%"
+
+            rem Verify Java is on PATH (optional but helpful)
+            where java || (echo "java" not found on PATH & exit /b 1)
+
+            rem Launch detached with PowerShell using an ArgumentList array
+            powershell -NoProfile -Command ^
+              "$jar = [IO.Path]::GetFullPath('%JARPATH%'); " ^
+              "Start-Process -FilePath 'java' -ArgumentList @('-jar', $jar) -WindowStyle Hidden"
+
+            endlocal
+        '''
+    }
+}
     }
 
     post {
