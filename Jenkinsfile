@@ -6,7 +6,7 @@ pipeline {
         stage('Pull Code from GitHub') {
             steps {
                 // The git step automatically handles cloning the repository based on the job configuration.
-                git branch: 'main', url: 'https://github.com/your-username/your-repo.git'
+                git branch: 'main', url: 'https://github.com/NagaKarthikSarma/jenkinstest.git'
             }
         }
 
