@@ -1,5 +1,5 @@
 pipeline {
-    agent any // ensure this runs on a Windows agent
+    agent { label 'windows' } // ensure this runs on a Windows agent
 
     options {
         timestamps()
@@ -13,15 +13,14 @@ pipeline {
         GIT_URL    = 'https://github.com/NagaKarthikSarma/jenkinstest.git'
         GIT_BRANCH = 'main'
 
-        // App/runtime config (adjust if needed)
+        // App/runtime config
         APP_PORT   = '8081'
         JAVA_EXE   = 'java'
         START_ARGS = '-Xms256m -Xmx512m'
         JAR_GLOB   = 'target\\*.jar'
         HEALTH_URL = "http://localhost:8081/"
-           // change to /actuator/health if you enable actuator
 
-        // Derived paths
+        // Paths
         WORKDIR    = "${env.WORKSPACE}"
         LOG_DIR    = "${env.WORKSPACE}\\logs"
         PID_FILE   = "${env.WORKSPACE}\\app.pid"
@@ -71,7 +70,7 @@ pipeline {
             steps {
                 script {
                     def jarPath = null
-                    // Try Pipeline Utility Steps if installed
+                    // Try Pipeline Utility Steps if installed; otherwise fallback
                     try {
                         def files = findFiles(glob: env.JAR_GLOB)
                         if (files && files.size() > 0) {
@@ -80,7 +79,6 @@ pipeline {
                     } catch (ignored) {}
 
                     if (!jarPath) {
-                        // Fallback: use cmd dir /b
                         withEnv(["JARGLOB=${env.JAR_GLOB}"]) {
                             bat '''
                                 setlocal enabledelayedexpansion
@@ -147,7 +145,6 @@ pipeline {
         stage('Health Check') {
             steps {
                 echo "Probing health: ${env.HEALTH_URL}"
-                // Try up to 30 times (≈ 60s) for HTTP 200-399 (or content containing 'UP')
                 bat '''
                     powershell -NoProfile -Command ^
                       "$u='$env:HEALTH_URL'; " ^
@@ -168,8 +165,16 @@ pipeline {
             echo "Lifecycle completed successfully."
             archiveArtifacts artifacts: 'logs\\*.out, logs\\*.err, app.out, app.err', allowEmptyArchive: true, fingerprint: true
         }
-        unsuccessful {
-            echo "Lifecycle did not complete successfully."
+        failure {
+            echo "Lifecycle failed."
+            archiveArtifacts artifacts: 'logs\\*.out, logs\\*.err, app.out, app.err', allowEmptyArchive: true, fingerprint: true
+        }
+        unstable {
+            echo "Lifecycle finished UNSTABLE."
+            archiveArtifacts artifacts: 'logs\\*.out, logs\\*.err, app.out, app.err', allowEmptyArchive: true, fingerprint: true
+        }
+        aborted {
+            echo "Lifecycle ABORTED."
             archiveArtifacts artifacts: 'logs\\*.out, logs\\*.err, app.out, app.err', allowEmptyArchive: true, fingerprint: true
         }
         always {
