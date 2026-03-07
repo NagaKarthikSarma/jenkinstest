@@ -2,10 +2,11 @@ pipeline {
   agent any
 
   parameters {
+    // Only used if you switch to an inline pipeline; for "Pipeline from SCM" we use checkout scm
     string(name: 'REPO_URL', defaultValue: 'https://github.com/NagaKarthikSarma/jenkinstest.git', description: 'Repository URL (if using inline pipeline)')
     string(name: 'BRANCH',    defaultValue: 'main', description: 'Branch (if using inline pipeline)')
     booleanParam(name: 'SKIP_TESTS', defaultValue: true, description: 'Skip tests during build')
-    string(name: 'APP_PORT',  defaultValue: '8080', description: 'Spring Boot server.port')
+    string(name: 'APP_PORT',  defaultValue: '8081', description: 'Spring Boot server.port')
     string(name: 'HEALTH_PATH', defaultValue: '/', description: 'Health path (e.g., / or /actuator/health)')
   }
 
@@ -14,15 +15,18 @@ pipeline {
     disableConcurrentBuilds()
     buildDiscarder(logRotator(numToKeepStr: '20'))
     timeout(time: 30, unit: 'MINUTES')
-    // ansiColor('xterm')  <-- removed because the plugin isn't installed
+    skipDefaultCheckout(true)   // we control checkout explicitly below
   }
 
   stages {
     stage('Checkout') {
       steps {
+        // Clean workspace then checkout the Jenkinsfile's SCM (works for Pipeline-from-SCM jobs)
         deleteDir()
-        // If this pipeline is from SCM, Jenkins already did the checkout automatically.
-        // If you’re pasting this as an inline pipeline job, uncomment:
+        checkout scm
+
+        // If you are running this pipeline as inline (not from SCM), comment the line above
+        // and uncomment the line below to checkout by URL/branch:
         // git url: params.REPO_URL, branch: params.BRANCH
       }
     }
@@ -68,10 +72,12 @@ pipeline {
     stage('Run Application') {
       steps {
         script {
-          // Find jar (single-line PowerShell)
+          // --- Find the runnable JAR (single-line PowerShell to avoid cmd parsing issues) ---
           def jarPath = bat(returnStdout: true, script: """
             powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-              "$ErrorActionPreference='SilentlyContinue'; \$j = Get-ChildItem -Path 'target\\*.jar' | Where-Object { \$_.Name -notmatch 'sources|javadoc' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if (\$j) { \$j.FullName }"
+              "$ErrorActionPreference='SilentlyContinue'; ^
+               \$j = Get-ChildItem -Path 'target\\*.jar' | Where-Object { \$_.Name -notmatch 'sources|javadoc' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; ^
+               if (\$j) { \$j.FullName }"
           """).trim()
 
           if (!jarPath) {
@@ -79,7 +85,7 @@ pipeline {
           }
           echo "Found JAR: ${jarPath}"
 
-          // Start app in background and capture PID
+          // --- Start app in background and capture PID ---
           bat """
             powershell -NoProfile -ExecutionPolicy Bypass -Command ^
               "$ErrorActionPreference='Stop'; ^
@@ -91,16 +97,21 @@ pipeline {
                'Started PID: ' + \$p.Id | Out-File -FilePath \$log -Append"
           """
 
-          // Wait for health URL to respond
+          // --- Wait for health URL to respond ---
           def healthUrl = "http://localhost:${params.APP_PORT}${params.HEALTH_PATH}"
           def status = bat(returnStatus: true, script: """
             powershell -NoProfile -ExecutionPolicy Bypass -Command ^
               "$ErrorActionPreference='SilentlyContinue'; ^
-               \$u='${healthUrl}'; \$deadline=(Get-Date).AddSeconds(90); ^
+               \$u='${healthUrl}'; ^
+               \$deadline=(Get-Date).AddSeconds(90); ^
                while((Get-Date) -lt \$deadline){ ^
-                 try { \$r=Invoke-WebRequest -Uri \$u -UseBasicParsing -TimeoutSec 3; if([int]\$r.StatusCode -ge 100){ exit 0 } } catch {}; ^
+                 try { ^
+                   \$r=Invoke-WebRequest -Uri \$u -UseBasicParsing -TimeoutSec 3; ^
+                   if([int]\$r.StatusCode -ge 100){ exit 0 } ^
+                 } catch {}; ^
                  Start-Sleep -Seconds 3 ^
-               }; exit 1"
+               }; ^
+               exit 1"
           """)
           if (status != 0) {
             error "App did not respond at ${healthUrl} within 90s. Check app.log."
