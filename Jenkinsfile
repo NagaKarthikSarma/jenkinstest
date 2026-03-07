@@ -1,5 +1,5 @@
 pipeline {
-    agent { label 'windows' } // <-- Change to your Windows agent label if different
+    agent any / <-- Change to your Windows agent label if different
 
     options {
         timestamps()
