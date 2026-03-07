@@ -1,0 +1,289 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        // Prevent Jenkins from implicitly doing an additional SCM checkout
+        skipDefaultCheckout(true)
+        // No pipeline timeout — it will wait until app is reachable or the process dies
+    }
+
+    // >>> Adjust these if needed <<<
+    environment {
+        APP_PORT     = '8081'
+        CONTEXT_PATH = '/fetchglmdata'   // set '/' if no context path
+        START_PAGE   = '/Login'          // set '/' or another public page if different
+        JAVA_OPTS    = ''                // e.g., '-Xms256m -Xmx512m'
+        APP_ARGS     = ''                // any extra Spring args
+    }
+
+    stages {
+        stage('Pull from Git') {
+            steps {
+                // If your repo is private, add: credentialsId: 'your-creds-id'
+                git branch: 'main', url: 'https://github.com/NagaKarthikSarma/jenkinstest.git'
+            }
+        }
+
+        stage('Tool sanity (optional)') {
+            steps {
+                echo 'Checking Java & Maven availability...'
+                bat 'java -version'
+                bat 'mvn -v'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                bat 'mvn -B -DskipTests clean package'
+            }
+        }
+
+        stage('Pick JAR') {
+            steps {
+                powershell '''
+                    try {
+                        $jars = Get-ChildItem -Path target -Filter *.jar -ErrorAction Stop `
+                            | Where-Object { $_.Name -notmatch 'sources|javadoc|original' } `
+                            | Sort-Object LastWriteTime -Descending
+
+                        if (-not $jars -or $jars.Count -eq 0) {
+                            throw "No runnable JAR found in target/. Check your Maven packaging or finalName."
+                        }
+
+                        $jar = $jars | Select-Object -First 1
+                        $jar.FullName | Out-File -FilePath jar_path.txt -Encoding ascii
+                        exit 0
+                    } catch {
+                        Write-Host $_.Exception.Message
+                        exit 1
+                    }
+                '''
+                script {
+                    env.JAR_PATH = readFile('jar_path.txt').trim()
+                    echo "Selected JAR: ${env.JAR_PATH}"
+                }
+            }
+        }
+
+        stage('Stop Previous Instance (if any)') {
+            steps {
+                powershell '''
+                    try {
+                        if (Test-Path app.pid) {
+                            $appPid = Get-Content app.pid | Select-Object -First 1
+                            if ($appPid -and (Get-Process -Id $appPid -ErrorAction SilentlyContinue)) {
+                                Write-Host "Stopping previous process PID $appPid..."
+                                Stop-Process -Id $appPid -Force -ErrorAction Stop
+                                Start-Sleep -Seconds 2
+                            }
+                            Remove-Item -Force app.pid -ErrorAction SilentlyContinue
+                        }
+                        exit 0
+                    } catch {
+                        Write-Warning "Stop previous instance warning: $($_.Exception.Message)"
+                        Remove-Item -Force app.pid -ErrorAction SilentlyContinue
+                        exit 0
+                    }
+                '''
+            }
+        }
+
+        stage('Run Application (background)') {
+            steps {
+                echo 'Starting the application in background...'
+                powershell '''
+                    try {
+                        $wd       = $pwd
+                        $log      = Join-Path $wd "app.log"
+                        $jarPath  = $env:JAR_PATH
+
+                        # Normalize context-path
+                        $ctx = $env:CONTEXT_PATH
+                        if (-not $ctx) { $ctx = '/' }
+                        if ($ctx -ne '/' -and $ctx -notmatch '^/') { $ctx = '/' + $ctx }
+                        $ctx = $ctx -replace '/+$',''
+                        if ($ctx -eq '') { $ctx = '/' }
+
+                        $javaOpts = $env:JAVA_OPTS
+                        $appArgs  = $env:APP_ARGS
+                        $port     = $env:APP_PORT
+
+                        # Use cmd.exe to redirect stdout+stderr to a single file
+                        $cmd = "/c java $javaOpts -jar `"$jarPath`" --server.port=$port --server.servlet.context-path=`"$ctx`" $appArgs >> `"$log`" 2>&1"
+
+                        $p = Start-Process -FilePath "cmd.exe" `
+                                           -ArgumentList $cmd `
+                                           -WorkingDirectory $wd `
+                                           -WindowStyle Hidden `
+                                           -PassThru
+
+                        if (-not $p -or -not $p.Id) {
+                            throw "Failed to start the application process."
+                        }
+
+                        $p.Id | Out-File -FilePath app.pid -Encoding ascii
+                        Write-Host "Application started. PID = $($p.Id). Log: $log"
+
+                        Start-Sleep -Seconds 3
+                        if (Test-Path $log) {
+                            Write-Host "----- Initial app.log tail -----"
+                            Get-Content $log -Tail 80 | Write-Host
+                            Write-Host "--------------------------------"
+                        } else {
+                            Write-Warning "Log file not found yet: $log"
+                        }
+
+                        exit 0
+                    } catch {
+                        Write-Host $_.Exception.Message
+                        exit 1
+                    }
+                '''
+            }
+        }
+
+        stage('Wait Until Up & Show URL (no timeout)') {
+            steps {
+                powershell '''
+                    try {
+                        $logPath = Join-Path $pwd "app.log"
+                        if (!(Test-Path $logPath)) {
+                            throw "Log file not found: $logPath"
+                        }
+
+                        # Build base URLs (hostname + IPv4)
+                        $host = $env:COMPUTERNAME
+                        $port = $env:APP_PORT
+
+                        # Normalize context-path & start-page
+                        $ctx = $env:CONTEXT_PATH
+                        if (-not $ctx) { $ctx = '/' }
+                        if ($ctx -ne '/' -and $ctx -notmatch '^/') { $ctx = '/' + $ctx }
+                        $ctx = $ctx -replace '/+$',''
+                        if ($ctx -eq '') { $ctx = '/' }
+
+                        $startPage = $env:START_PAGE
+                        if (-not $startPage) { $startPage = '/' }
+                        if ($startPage -notmatch '^/') { $startPage = '/' + $startPage }
+
+                        $urlHostBase = "http://$host`:$port"
+                        if ($ctx -eq '/') {
+                            $urlHostApp = "$urlHostBase/"
+                        } else {
+                            $urlHostApp = "$urlHostBase$ctx/"
+                        }
+                        $urlHostPage = "$urlHostBase$ctx$startPage"
+
+                        $ipStr = $null
+                        try {
+                            $addrs = [System.Net.Dns]::GetHostAddresses($host)
+                            foreach ($a in $addrs) {
+                                if ($a.AddressFamily.ToString() -eq 'InterNetwork') { $ipStr = $a.IPAddressToString; break }
+                            }
+                        } catch { $ipStr = $null }
+
+                        $urlIPBase = $null
+                        $urlIPApp  = $null
+                        $urlIPPage = $null
+                        if ($ipStr) {
+                            $urlIPBase = "http://$ipStr`:$port"
+                            if ($ctx -eq '/') {
+                                $urlIPApp = "$urlIPBase/"
+                            } else {
+                                $urlIPApp = "$urlIPBase$ctx/"
+                            }
+                            $urlIPPage = "$urlIPBase$ctx$startPage"
+                        }
+
+                        # Read PID of the launcher process (cmd.exe hosting java)
+                        $appPid = $null
+                        if (Test-Path "app.pid") {
+                            $appPid = (Get-Content app.pid | Select-Object -First 1)
+                        }
+
+                        Write-Host "Waiting for the application to be fully up at:"
+                        Write-Host "  $urlHostApp"
+                        if ($urlIPApp) { Write-Host "  $urlIPApp" }
+                        Write-Host "No timeout… (press Stop in Jenkins to abort)"
+
+                        function Test-HttpOk {
+                            param([string]$u)
+                            try {
+                                # Accept 2xx–3xx as "up" (login redirects OK)
+                                $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 10 -ErrorAction Stop
+                                $code = [int]$resp.StatusCode
+                                return ($code -ge 200 -and $code -lt 400)
+                            } catch {
+                                return $false
+                            }
+                        }
+
+                        while ($true) {
+                            Start-Sleep -Seconds 3
+
+                            # If the launcher process died early, fail with logs
+                            if ($appPid) {
+                                $alive = Get-Process -Id $appPid -ErrorAction SilentlyContinue
+                                if (-not $alive) {
+                                    Write-Host "----- Last 200 lines of app.log -----"
+                                    Get-Content $logPath -Tail 200 | Write-Host
+                                    Write-Host "-------------------------------------"
+                                    throw "The application process ended before reporting readiness. See app.log above."
+                                }
+                            }
+
+                            # (A) If your app prints explicit URLs ("Access the app at:"), show them
+                            $logContent = Get-Content $logPath -Raw
+                            $accessLines = ($logContent -split "`n") | Where-Object { $_ -match 'Access the app at:' }
+                            if ($accessLines -and $accessLines.Count -gt 0) {
+                                Write-Host "====================================="
+                                Write-Host " Application URL(s) from app logs:"
+                                $accessLines | ForEach-Object { Write-Host ("  " + $_.Trim()) }
+                                Write-Host "====================================="
+                                break
+                            }
+
+                            # (B) Actively probe your start page until it responds (no timeout)
+                            $ok = $false
+                            if (Test-HttpOk -u $urlHostPage) { $ok = $true }
+                            elseif ($urlIPPage -and (Test-HttpOk -u $urlIPPage)) { $ok = $true }
+
+                            if ($ok) {
+                                Write-Host "====================================="
+                                Write-Host " Application is live at:"
+                                Write-Host "   $urlHostApp"
+                                if ($urlIPApp) { Write-Host "   $urlIPApp" }
+                                Write-Host " Login / start page:"
+                                Write-Host "   $urlHostPage"
+                                if ($urlIPPage) { Write-Host "   $urlIPPage" }
+                                Write-Host "====================================="
+                                break
+                            }
+
+                            # Small heartbeat
+                            Write-Host -NoNewline "."
+                        }
+
+                        Write-Host "`nApplication startup detected successfully."
+                        exit 0
+                    } catch {
+                        Write-Host $_.Exception.Message
+                        exit 1
+                    }
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Build finished. Archiving artifacts...'
+            archiveArtifacts artifacts: 'app.log, app.pid, target/*.jar', fingerprint: true, onlyIfSuccessful: false
+        }
+        failure {
+            echo 'Pipeline failed. Last log lines (if any):'
+            powershell 'if (Test-Path app.log) { Get-Content app.log -Tail 200 | Write-Host } else { Write-Host "No app.log found." }'
+        }
+    }
+}
