@@ -67,11 +67,10 @@ pipeline {
         }
       }
     }
-
-    stage('Run Application') {
+stage('Run Application') {
       steps {
         script {
-          // 1) Find the runnable JAR (single-line PowerShell so cmd.exe doesn't split pipes)
+          // 1) Find the runnable JAR
           def jarPath = bat(returnStdout: true, script: '''
             powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $j = Get-ChildItem -Path 'target\\*.jar' | Where-Object { $_.Name -notmatch 'sources|javadoc' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($j) { $j.FullName }"
           ''').trim()
@@ -81,53 +80,37 @@ pipeline {
           }
           echo "Found JAR: ${jarPath}"
 
-          // Normalize path and compose health URL
           def normalizedJar = jarPath.replace('\\','/')
           def healthUrl = "http://localhost:${params.APP_PORT}${params.HEALTH_PATH}"
 
-          // 2) Export values so PowerShell can read them as $env:VAR
           withEnv([
             "JAR_PATH=${normalizedJar}",
             "APP_PORT=${params.APP_PORT}",
-            "HEALTH_PATH=${params.HEALTH_PATH}",
             "HEALTH_URL=${healthUrl}"
           ]) {
 
-            // 3) Start app in background, redirect OUT and ERR to different files, capture PID
+            // 2) FIX: Start process WITHOUT trying to write to the log file simultaneously via Out-File
             bat '''
-              powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $logOut = Join-Path (Get-Location) 'app.out.log'; $logErr = Join-Path (Get-Location) 'app.err.log'; if (Test-Path $logOut) { Remove-Item $logOut -Force }; if (Test-Path $logErr) { Remove-Item $logErr -Force }; $args = @('-jar', $env:JAR_PATH, '--server.port=' + $env:APP_PORT); $p = Start-Process -FilePath 'java' -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $logOut -RedirectStandardError $logErr; Set-Content -Path app.pid -Value $p.Id; 'Started PID: ' + $p.Id | Out-File -FilePath $logOut -Append"
+              powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $logOut = Join-Path (Get-Location) 'app.out.log'; $logErr = Join-Path (Get-Location) 'app.err.log'; if (Test-Path $logOut) { Remove-Item $logOut -Force }; if (Test-Path $logErr) { Remove-Item $logErr -Force }; $args = @('-jar', $env:JAR_PATH, '--server.port=' + $env:APP_PORT); $p = Start-Process -FilePath 'java' -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $logOut -RedirectStandardError $logErr; Set-Content -Path app.pid -Value $p.Id"
             '''
 
-            // 4) Wait for health URL to respond (any HTTP status means it's responding)
+            // 3) Wait for health URL
             def status = bat(returnStatus: true, script: '''
               powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $u=$env:HEALTH_URL; $deadline=(Get-Date).AddSeconds(90); while((Get-Date) -lt $deadline){ try { $r=Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 3; if([int]$r.StatusCode -ge 100){ exit 0 } } catch {}; Start-Sleep -Seconds 3 }; exit 1"
             ''')
+            
             if (status != 0) {
-              // show whatever logs we have for easier debugging
-              bat 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content .\\app.out.log -Tail 200 -ErrorAction SilentlyContinue; Get-Content .\\app.err.log -Tail 200 -ErrorAction SilentlyContinue"'
-              error "App did not respond at ${healthUrl} within 90s. Check app.out.log/app.err.log."
+              bat 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content .\\app.out.log -Tail 50; Get-Content .\\app.err.log -Tail 50"'
+              error "App did not respond at ${healthUrl} within 90s."
             }
 
             echo "App responded at ${healthUrl}"
-            // Show a tail of both logs
-            bat 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content .\\app.out.log -Tail 80 -ErrorAction SilentlyContinue; Get-Content .\\app.err.log -Tail 80 -ErrorAction SilentlyContinue"'
           }
         }
       }
-      post {
-        always {
-          script {
-            if (fileExists('app.pid')) {
-              def pid = readFile('app.pid').trim()
-              echo "Stopping app (PID ${pid}) ..."
-              bat "taskkill /PID ${pid} /F || ver"
-            } else {
-              echo "No app.pid found; nothing to stop."
-            }
-          }
-        }
-      }
+      // ... keep your post { always { taskkill } } logic as it is
     }
+    
   }
 
   post {
