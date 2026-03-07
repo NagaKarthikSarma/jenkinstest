@@ -1,72 +1,52 @@
 pipeline {
-    agent any // <-- Change to your Windows agent label if different
+    agent any // ensure this runs on a Windows agent
 
     options {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '20'))
-        disableConcurrentBuilds()  // avoid overlapping lifecycle runs
+        disableConcurrentBuilds()
         timeout(time: 30, unit: 'MINUTES')
     }
 
-    parameters {
-        choice(name: 'ACTION',
-               choices: ['BUILD_AND_RESTART', 'RESTART', 'START', 'STOP', 'BUILD_ONLY'],
-               description: 'Lifecycle action to perform')
-
-        string(name: 'GIT_URL', defaultValue: 'https://github.com/NagaKarthikSarma/jenkinstest.git',
-               description: 'Repository URL')
-        string(name: 'GIT_BRANCH', defaultValue: 'main', description: 'Branch to build')
-
-        string(name: 'JAR_GLOB', defaultValue: 'target\\*.jar',
-               description: 'Glob to locate the built JAR (Windows-style backslashes)')
-        string(name: 'JAVA_EXE', defaultValue: 'java',
-               description: 'Path to java.exe or just "java" if on PATH')
-
-        string(name: 'APP_PORT', defaultValue: '8080', description: 'Port your app listens on')
-        string(name: 'START_ARGS', defaultValue: '-Xms256m -Xmx512m',
-               description: 'Extra JVM args (do NOT include -jar here)')
-
-        // If you use Spring Actuator, set to /actuator/health. Otherwise / is safer.
-        string(name: 'HEALTH_PATH', defaultValue: '/',
-               description: 'Relative health path (use /actuator/health if Actuator enabled)')
-
-        booleanParam(name: 'SKIP_HEALTH', defaultValue: false, description: 'Skip health check stage')
-
-        string(name: 'WORKING_DIR', defaultValue: '',
-               description: 'Working directory for app (leave empty to use workspace)')
-    }
-
     environment {
-        WORKDIR    = "${params.WORKING_DIR ?: env.WORKSPACE}"
+        // Fixed values (no parameters)
+        GIT_URL    = 'https://github.com/NagaKarthikSarma/jenkinstest.git'
+        GIT_BRANCH = 'main'
+
+        // App/runtime config (adjust if needed)
+        APP_PORT   = '8081'
+        JAVA_EXE   = 'java'
+        START_ARGS = '-Xms256m -Xmx512m'
+        JAR_GLOB   = 'target\\*.jar'
+        HEALTH_URL = "http://localhost:8081/"   // change to /actuator/health if you enable actuator
+
+        // Derived paths
+        WORKDIR    = "${env.WORKSPACE}"
         LOG_DIR    = "${env.WORKSPACE}\\logs"
         PID_FILE   = "${env.WORKSPACE}\\app.pid"
-        HEALTH_URL = "http://localhost:${params.APP_PORT}${params.HEALTH_PATH}"
         OUT_LOG    = "${env.WORKSPACE}\\app.out"
         ERR_LOG    = "${env.WORKSPACE}\\app.err"
     }
 
     stages {
         stage('Checkout') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'BUILD_ONLY'] } }
             steps {
-                git url: params.GIT_URL, branch: params.GIT_BRANCH
+                git url: env.GIT_URL, branch: env.GIT_BRANCH
             }
         }
 
         stage('Build') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'BUILD_ONLY'] } }
             steps {
-                // If you configured Maven/JDK tools in Jenkins, you can add a tools{} block at top-level
                 bat 'mvn -version'
                 bat 'mvn -B -DskipTests clean package'
             }
         }
 
         stage('Stop Previous App') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'STOP'] } }
             steps {
                 echo "Attempting to stop previously running app…"
-                // 1) Stop by known PID (from previous run)
+
+                // Stop via PID file if present
                 bat '''
                     setlocal
                     if exist "%PID_FILE%" (
@@ -78,50 +58,50 @@ pipeline {
                     )
                     endlocal
                 '''
-                // 2) Best-effort stop by listening port (if PID file was missing)
-                bat """
+
+                // Fallback: stop whoever is listening on APP_PORT
+                bat '''
                     powershell -NoProfile -Command ^
-                      "$p = Get-NetTCPConnection -LocalPort ${params.APP_PORT} -ErrorAction SilentlyContinue | Select-Object -First 1; " ^
-                      "if(\$p -and \$p.OwningProcess) { " ^
-                      "  try { Stop-Process -Id \$p.OwningProcess -Force -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {} " ^
-                      "} "
-                """
+                      "$p = Get-NetTCPConnection -LocalPort $env:APP_PORT -ErrorAction SilentlyContinue | Select-Object -First 1; " ^
+                      "if($p -and $p.OwningProcess) { try { Stop-Process -Id $p.OwningProcess -Force -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {} }"
+                '''
             }
         }
 
         stage('Locate JAR') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
             steps {
                 script {
                     def jarPath = null
-                    // Try Pipeline Utility Steps if present; otherwise fall back to cmd
+                    // Try Pipeline Utility Steps if installed
                     try {
-                        def files = findFiles(glob: params.JAR_GLOB)
+                        def files = findFiles(glob: env.JAR_GLOB)
                         if (files && files.size() > 0) {
                             jarPath = files[0].path.replace('/', '\\')
                         }
                     } catch (ignored) {}
 
                     if (!jarPath) {
-                        // Fallback: find the first JAR using dir /b
-                        bat """
-                            setlocal enabledelayedexpansion
-                            set "JARFILE="
-                            for /f "delims=" %%F in ('dir /b /a:-d ${params.JAR_GLOB}') do (
-                                set "JARFILE=%%F"
-                                goto :found
-                            )
-                            echo NOJAR> jar.tmp
-                            exit /b 0
-                            :found
-                            echo !JARFILE!> jar.tmp
-                            endlocal
-                        """
+                        // Fallback: use cmd dir /b
+                        withEnv(["JARGLOB=${env.JAR_GLOB}"]) {
+                            bat '''
+                                setlocal enabledelayedexpansion
+                                set "JARFILE="
+                                for /f "delims=" %%F in ('dir /b /a:-d %JARGLOB%') do (
+                                    set "JARFILE=%%F"
+                                    goto :found
+                                )
+                                echo NOJAR> jar.tmp
+                                exit /b 0
+                                :found
+                                echo !JARFILE!> jar.tmp
+                                endlocal
+                            '''
+                        }
                         def name = readFile('jar.tmp').trim()
                         if (name == 'NOJAR' || name == '') {
-                            error "No JAR found with glob: ${params.JAR_GLOB}"
+                            error "No JAR found with glob: ${env.JAR_GLOB}"
                         }
-                        def baseDir = params.JAR_GLOB.contains('\\') ? params.JAR_GLOB.substring(0, params.JAR_GLOB.lastIndexOf('\\')) : ''
+                        def baseDir = env.JAR_GLOB.contains('\\') ? env.JAR_GLOB.substring(0, env.JAR_GLOB.lastIndexOf('\\')) : ''
                         jarPath = baseDir ? "${env.WORKSPACE}\\${baseDir}\\${name}" : "${env.WORKSPACE}\\${name}"
                     }
 
@@ -132,23 +112,21 @@ pipeline {
         }
 
         stage('Rotate Logs') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
             steps {
-                bat """
+                bat '''
                     if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
                     powershell -NoProfile -Command ^
                       "$ts = (Get-Date).ToString('yyyyMMdd_HHmmss'); " ^
-                      "$srcs = @('%OUT_LOG%','%ERR_LOG%'); " ^
-                      "foreach(\$s in \$srcs){ if(Test-Path \$s){ \$name = Split-Path \$s -Leaf; \$dest = Join-Path '%LOG_DIR%' (\$name -replace '\\.', ('_' + \$ts + '.')); Move-Item -Force \$s \$dest } }"
-                """
+                      "$srcs = @('$env:OUT_LOG','$env:ERR_LOG'); " ^
+                      "foreach($s in $srcs){ if(Test-Path $s){ $name = Split-Path $s -Leaf; $dest = Join-Path '$env:LOG_DIR' ($name -replace '\\.', ('_' + $ts + '.')); Move-Item -Force $s $dest } }"
+                '''
             }
         }
 
         stage('Start App (Detached)') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
             steps {
                 echo "Starting app in background (detached)…"
-                bat """
+                bat '''
                     set "JARPATH=%JAR_PATH%"
                     if not exist "%JARPATH%" (
                       echo JAR does not exist: %JARPATH%
@@ -156,50 +134,43 @@ pipeline {
                     )
 
                     powershell -NoProfile -Command ^
-                      "$jar = [IO.Path]::GetFullPath('%JARPATH%'); " ^
-                      "$wd  = [IO.Path]::GetFullPath('%WORKDIR%'); " ^
-                      "$args = '%START_ARGS% -Dserver.port=${params.APP_PORT} -jar ' + '\"' + $jar + '\"'; " ^
-                      "$p = Start-Process -FilePath '%JAVA_EXE%' -ArgumentList $args -WorkingDirectory $wd -RedirectStandardOutput '%OUT_LOG%' -RedirectStandardError '%ERR_LOG%' -WindowStyle Hidden -PassThru; " ^
-                      "$p.Id | Set-Content -Encoding Ascii '%PID_FILE%'"
+                      "$jar = [IO.Path]::GetFullPath('$env:JARPATH'); " ^
+                      "$wd  = [IO.Path]::GetFullPath('$env:WORKDIR'); " ^
+                      "$args = '$env:START_ARGS -Dserver.port=$env:APP_PORT -jar ' + '\"' + $jar + '\"'; " ^
+                      "$p = Start-Process -FilePath '$env:JAVA_EXE' -ArgumentList $args -WorkingDirectory $wd -RedirectStandardOutput '$env:OUT_LOG' -RedirectStandardError '$env:ERR_LOG' -WindowStyle Hidden -PassThru; " ^
+                      "$p.Id | Set-Content -Encoding Ascii '$env:PID_FILE'"
 
                     echo Started. PID saved in %PID_FILE%
-                """
+                '''
             }
         }
 
         stage('Health Check') {
-            when {
-                expression {
-                    // Run only if START/RESTART and not skipped
-                    return (params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START']) && !params.SKIP_HEALTH
-                }
-            }
             steps {
-                echo "Probing health: ${HEALTH_URL}"
-                // Try up to 30 times (≈ 60s) for UP or HTTP 200-399
-                bat """
+                echo "Probing health: ${env.HEALTH_URL}"
+                // Try up to 30 times (≈ 60s) for HTTP 200-399 (or content containing 'UP')
+                bat '''
                     powershell -NoProfile -Command ^
-                      "$u='${HEALTH_URL}'; " ^
-                      "for(\$i=0; \$i -lt 30; \$i++){ " ^
-                      "  try { " ^
-                      "    \$r = Invoke-WebRequest -Uri \$u -UseBasicParsing -TimeoutSec 5; " ^
-                      "    if( (\$r.StatusCode -ge 200 -and \$r.StatusCode -lt 400) -and (\$r.Content -match 'UP' -or \$r.StatusCode -eq 200) ) { exit 0 } " ^
-                      "  } catch { } " ^
+                      "$u='$env:HEALTH_URL'; " ^
+                      "for($i=0; $i -lt 30; $i++){ " ^
+                      "  try { $r = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 5; " ^
+                      "        if( ($r.StatusCode -ge 200 -and $r.StatusCode -lt 400) -and ($r.Content -match 'UP' -or $r.StatusCode -eq 200) ) { exit 0 } " ^
+                      "      } catch { } " ^
                       "  Start-Sleep -Seconds 2 " ^
                       "} " ^
                       "exit 1"
-                """
+                '''
             }
         }
     }
 
     post {
         success {
-            echo "Action '${params.ACTION}' completed successfully."
+            echo "Lifecycle completed successfully."
             archiveArtifacts artifacts: 'logs\\*.out, logs\\*.err, app.out, app.err', allowEmptyArchive: true, fingerprint: true
         }
         unsuccessful {
-            echo "Action '${params.ACTION}' did not complete successfully."
+            echo "Lifecycle did not complete successfully."
             archiveArtifacts artifacts: 'logs\\*.out, logs\\*.err, app.out, app.err', allowEmptyArchive: true, fingerprint: true
         }
         always {
