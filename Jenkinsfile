@@ -3,9 +3,8 @@ pipeline {
 
     options {
         timestamps()
-        // ansiColor('xterm')  // <-- REMOVE this line (plugin not installed or unsupported)
         buildDiscarder(logRotator(numToKeepStr: '20'))
-        disableConcurrentBuilds()
+        disableConcurrentBuilds()  // avoid overlapping lifecycle runs
         timeout(time: 30, unit: 'MINUTES')
     }
 
@@ -27,8 +26,11 @@ pipeline {
         string(name: 'START_ARGS', defaultValue: '-Xms256m -Xmx512m',
                description: 'Extra JVM args (do NOT include -jar here)')
 
-        string(name: 'HEALTH_PATH', defaultValue: '/actuator/health',
-               description: 'Relative health path (set to "/" if not using Actuator)')
+        // If you use Spring Actuator, set to /actuator/health. Otherwise / is safer.
+        string(name: 'HEALTH_PATH', defaultValue: '/',
+               description: 'Relative health path (use /actuator/health if Actuator enabled)')
+
+        booleanParam(name: 'SKIP_HEALTH', defaultValue: false, description: 'Skip health check stage')
 
         string(name: 'WORKING_DIR', defaultValue: '',
                description: 'Working directory for app (leave empty to use workspace)')
@@ -47,90 +49,84 @@ pipeline {
         stage('Checkout') {
             when { expression { params.ACTION in ['BUILD_AND_RESTART', 'BUILD_ONLY'] } }
             steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    git url: params.GIT_URL, branch: params.GIT_BRANCH
-                }
+                git url: params.GIT_URL, branch: params.GIT_BRANCH
             }
         }
 
         stage('Build') {
             when { expression { params.ACTION in ['BUILD_AND_RESTART', 'BUILD_ONLY'] } }
             steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    // tools { maven 'Maven 3.x'; jdk 'JDK 17' } // if configured globally
-                    bat 'mvn -version'
-                    bat 'mvn -B -DskipTests clean package'
-                }
+                // If you configured Maven/JDK tools in Jenkins, you can add a tools{} block at top-level
+                bat 'mvn -version'
+                bat 'mvn -B -DskipTests clean package'
             }
         }
 
         stage('Stop Previous App') {
             when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'STOP'] } }
             steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    echo "Attempting to stop previously running app…"
-
-                    bat '''
-                        setlocal
-                        if exist "%PID_FILE%" (
-                          for /f "usebackq delims=" %%P in ("%PID_FILE%") do (
-                            echo Stopping PID from PID_FILE: %%P
-                            powershell -NoProfile -Command "try { Stop-Process -Id %%P -Force -ErrorAction Stop } catch {}"
-                          )
-                          del /q "%PID_FILE%" 2>nul
-                        )
-                        endlocal
-                    '''
-
-                    bat """
-                        powershell -NoProfile -Command ^
-                          "$p = Get-NetTCPConnection -LocalPort ${params.APP_PORT} -ErrorAction SilentlyContinue | Select-Object -First 1; " ^
-                          "if(\$p -and \$p.OwningProcess) { " ^
-                          "  try { Stop-Process -Id \$p.OwningProcess -Force -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {} " ^
-                          "} "
-                    """
-                }
+                echo "Attempting to stop previously running app…"
+                // 1) Stop by known PID (from previous run)
+                bat '''
+                    setlocal
+                    if exist "%PID_FILE%" (
+                      for /f "usebackq delims=" %%P in ("%PID_FILE%") do (
+                        echo Stopping PID from PID_FILE: %%P
+                        powershell -NoProfile -Command "try { Stop-Process -Id %%P -Force -ErrorAction Stop } catch {}"
+                      )
+                      del /q "%PID_FILE%" 2>nul
+                    )
+                    endlocal
+                '''
+                // 2) Best-effort stop by listening port (if PID file was missing)
+                bat """
+                    powershell -NoProfile -Command ^
+                      "$p = Get-NetTCPConnection -LocalPort ${params.APP_PORT} -ErrorAction SilentlyContinue | Select-Object -First 1; " ^
+                      "if(\$p -and \$p.OwningProcess) { " ^
+                      "  try { Stop-Process -Id \$p.OwningProcess -Force -ErrorAction Stop; Start-Sleep -Seconds 2 } catch {} " ^
+                      "} "
+                """
             }
         }
 
         stage('Locate JAR') {
             when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
             steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    script {
-                        def jarPath = null
-                        try {
-                            def files = findFiles(glob: params.JAR_GLOB)
-                            if (files && files.size() > 0) {
-                                jarPath = files[0].path.replace('/', '\\')
-                            }
-                        } catch (ignored) {}
-
-                        if (!jarPath) {
-                            bat """
-                                setlocal enabledelayedexpansion
-                                set "JARFILE="
-                                for /f "delims=" %%F in ('dir /b /a:-d ${params.JAR_GLOB}') do (
-                                    set "JARFILE=%%F"
-                                    goto :found
-                                )
-                                echo NOJAR> jar.tmp
-                                exit /b 0
-                                :found
-                                echo !JARFILE!> jar.tmp
-                                endlocal
-                            """
-                            def name = readFile('jar.tmp').trim()
-                            if (name == 'NOJAR' || name == '') {
-                                error "No JAR found with glob: ${params.JAR_GLOB}"
-                            }
-                            def baseDir = params.JAR_GLOB.contains('\\') ? params.JAR_GLOB.substring(0, params.JAR_GLOB.lastIndexOf('\\')) : ''
-                            jarPath = baseDir ? "${env.WORKSPACE}\\${baseDir}\\${name}" : "${env.WORKSPACE}\\${name}"
+                script {
+                    def jarPath = null
+                    // Try Pipeline Utility Steps if present; otherwise fall back to cmd
+                    try {
+                        def files = findFiles(glob: params.JAR_GLOB)
+                        if (files && files.size() > 0) {
+                            jarPath = files[0].path.replace('/', '\\')
                         }
+                    } catch (ignored) {}
 
-                        env.JAR_PATH = jarPath
-                        echo "Resolved JAR: ${env.JAR_PATH}"
+                    if (!jarPath) {
+                        // Fallback: find the first JAR using dir /b
+                        bat """
+                            setlocal enabledelayedexpansion
+                            set "JARFILE="
+                            for /f "delims=" %%F in ('dir /b /a:-d ${params.JAR_GLOB}') do (
+                                set "JARFILE=%%F"
+                                goto :found
+                            )
+                            echo NOJAR> jar.tmp
+                            exit /b 0
+                            :found
+                            echo !JARFILE!> jar.tmp
+                            endlocal
+                        """
+                        def name = readFile('jar.tmp').trim()
+                        if (name == 'NOJAR' || name == '') {
+                            error "No JAR found with glob: ${params.JAR_GLOB}"
+                        }
+                        def baseDir = params.JAR_GLOB.contains('\\') ? params.JAR_GLOB.substring(0, params.JAR_GLOB.lastIndexOf('\\')) : ''
+                        jarPath = baseDir ? "${env.WORKSPACE}\\${baseDir}\\${name}" : "${env.WORKSPACE}\\${name}"
                     }
+
+                    env.JAR_PATH = jarPath
+                    echo "Resolved JAR: ${env.JAR_PATH}"
                 }
             }
         }
@@ -138,62 +134,61 @@ pipeline {
         stage('Rotate Logs') {
             when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
             steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    bat """
-                        if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
-                        powershell -NoProfile -Command ^
-                          "$ts = (Get-Date).ToString('yyyyMMdd_HHmmss'); " ^
-                          "$srcs = @('%OUT_LOG%','%ERR_LOG%'); " ^
-                          "foreach(\$s in \$srcs){ if(Test-Path \$s){ \$name = Split-Path \$s -Leaf; \$dest = Join-Path '%LOG_DIR%' (\$name -replace '\\.', ('_' + \$ts + '.')); Move-Item -Force \$s \$dest } }"
-                    """
-                }
+                bat """
+                    if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+                    powershell -NoProfile -Command ^
+                      "$ts = (Get-Date).ToString('yyyyMMdd_HHmmss'); " ^
+                      "$srcs = @('%OUT_LOG%','%ERR_LOG%'); " ^
+                      "foreach(\$s in \$srcs){ if(Test-Path \$s){ \$name = Split-Path \$s -Leaf; \$dest = Join-Path '%LOG_DIR%' (\$name -replace '\\.', ('_' + \$ts + '.')); Move-Item -Force \$s \$dest } }"
+                """
             }
         }
 
         stage('Start App (Detached)') {
             when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
             steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    echo "Starting app in background (detached)…"
+                echo "Starting app in background (detached)…"
+                bat """
+                    set "JARPATH=%JAR_PATH%"
+                    if not exist "%JARPATH%" (
+                      echo JAR does not exist: %JARPATH%
+                      exit /b 2
+                    )
 
-                    bat """
-                        set "JARPATH=%JAR_PATH%"
-                        if not exist "%JARPATH%" (
-                          echo JAR does not exist: %JARPATH%
-                          exit /b 2
-                        )
+                    powershell -NoProfile -Command ^
+                      "$jar = [IO.Path]::GetFullPath('%JARPATH%'); " ^
+                      "$wd  = [IO.Path]::GetFullPath('%WORKDIR%'); " ^
+                      "$args = '%START_ARGS% -Dserver.port=${params.APP_PORT} -jar ' + '\"' + $jar + '\"'; " ^
+                      "$p = Start-Process -FilePath '%JAVA_EXE%' -ArgumentList $args -WorkingDirectory $wd -RedirectStandardOutput '%OUT_LOG%' -RedirectStandardError '%ERR_LOG%' -WindowStyle Hidden -PassThru; " ^
+                      "$p.Id | Set-Content -Encoding Ascii '%PID_FILE%'"
 
-                        powershell -NoProfile -Command ^
-                          "$jar = [IO.Path]::GetFullPath('%JARPATH%'); " ^
-                          "$wd  = [IO.Path]::GetFullPath('%WORKDIR%'); " ^
-                          "$args = '%START_ARGS% -Dserver.port=${params.APP_PORT} -jar ' + '\"' + $jar + '\"'; " ^
-                          "$p = Start-Process -FilePath '%JAVA_EXE%' -ArgumentList $args -WorkingDirectory $wd -RedirectStandardOutput '%OUT_LOG%' -RedirectStandardError '%ERR_LOG%' -WindowStyle Hidden -PassThru; " ^
-                          "$p.Id | Set-Content -Encoding Ascii '%PID_FILE%'"
-
-                        echo Started. PID saved in %PID_FILE%
-                    """
-                }
+                    echo Started. PID saved in %PID_FILE%
+                """
             }
         }
 
         stage('Health Check') {
-            when { expression { params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START'] } }
-            steps {
-                wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
-                    echo "Probing health: ${HEALTH_URL}"
-                    bat """
-                        powershell -NoProfile -Command ^
-                          "$u='${HEALTH_URL}'; " ^
-                          "for(\$i=0; \$i -lt 30; \$i++){ " ^
-                          "  try { " ^
-                          "    \$r = Invoke-WebRequest -Uri \$u -UseBasicParsing -TimeoutSec 5; " ^
-                          "    if( (\$r.StatusCode -ge 200 -and \$r.StatusCode -lt 400) -and (\$r.Content -match 'UP' -or \$r.StatusCode -eq 200) ) { exit 0 } " ^
-                          "  } catch { } " ^
-                          "  Start-Sleep -Seconds 2 " ^
-                          "} " ^
-                          "exit 1"
-                    """
+            when {
+                expression {
+                    // Run only if START/RESTART and not skipped
+                    return (params.ACTION in ['BUILD_AND_RESTART', 'RESTART', 'START']) && !params.SKIP_HEALTH
                 }
+            }
+            steps {
+                echo "Probing health: ${HEALTH_URL}"
+                // Try up to 30 times (≈ 60s) for UP or HTTP 200-399
+                bat """
+                    powershell -NoProfile -Command ^
+                      "$u='${HEALTH_URL}'; " ^
+                      "for(\$i=0; \$i -lt 30; \$i++){ " ^
+                      "  try { " ^
+                      "    \$r = Invoke-WebRequest -Uri \$u -UseBasicParsing -TimeoutSec 5; " ^
+                      "    if( (\$r.StatusCode -ge 200 -and \$r.StatusCode -lt 400) -and (\$r.Content -match 'UP' -or \$r.StatusCode -eq 200) ) { exit 0 } " ^
+                      "  } catch { } " ^
+                      "  Start-Sleep -Seconds 2 " ^
+                      "} " ^
+                      "exit 1"
+                """
             }
         }
     }
