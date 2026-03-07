@@ -9,7 +9,7 @@ pipeline {
         stage('Checkout Code') {
             steps {
                 // Fetches the code from the specified GitHub repository
-                git url: 'https://github.com', 
+                git url: 'https://github.com/NagaKarthikSarma/jenkinstest.git', 
                     branch: 'main' // Replace 'main' with your target branch
             }
         }
