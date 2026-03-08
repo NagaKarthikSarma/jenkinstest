@@ -3,12 +3,12 @@ pipeline {
 
     environment {
         // Your actual installations
-        JAVA_HOME   = 'C:/Program Files/Amazon Corretto/jdk21.0.4_7'
-        MAVEN_HOME  = 'C:/apache-maven-3.9.12'
-        APP_PORT    = '8081'
-
-        // Add Java + Maven to PATH
+        JAVA_HOME  = 'C:/Program Files/Amazon Corretto/jdk21.0.4_7'
+        MAVEN_HOME = 'C:/apache-maven-3.9.12'
+        APP_PORT   = '8081'
         PATH = "${MAVEN_HOME}/bin;${JAVA_HOME}/bin;${env.PATH}"
+        HEALTH_URL = "http://localhost:${APP_PORT}/actuator/health"
+        FALLBACK_URL = "http://localhost:${APP_PORT}/"
     }
 
     stages {
@@ -51,50 +51,55 @@ pipeline {
             }
             post {
                 always {
-                    junit allowEmptyResults: true,
-                          testResults: '**/target/surefire-reports/*.xml'
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
                 }
             }
         }
 
-       stage('Stop Existing Instance') {
-    steps {
-        echo "Stopping any existing instance on port ${env.APP_PORT}..."
-        bat """
-            @echo off
-            setlocal ENABLEDELAYEDEXPANSION
-            set PORT=${APP_PORT}
-
-            rem Try to find any LISTENING process on the port; ignore when not found
-            for /f "tokens=5" %%P in ('netstat -aon ^| findstr :!PORT! ^| findstr LISTENING') do (
-                echo Killing PID %%P on port !PORT!
-                taskkill /PID %%P /F
-            )
-
-            rem Always succeed even if nothing was found
-            exit /b 0
-        """
-    }
-}
+        stage('Stop Existing Instance') {
+            steps {
+                echo "Stopping any existing instance on port ${env.APP_PORT}..."
+                bat """
+                    @echo off
+                    setlocal
+                    set "PORT=${APP_PORT}"
+                    rem Check if anything is listening; if not, skip
+                    netstat -aon ^| findstr :%PORT% ^| findstr LISTENING >nul 2>&1
+                    if errorlevel 1 (
+                        echo No process is listening on port %PORT%.
+                    ) else (
+                        for /f "tokens=5" %%P in ('netstat -aon ^| findstr :%PORT% ^| findstr LISTENING') do (
+                            echo Killing PID %%P on port %PORT%
+                            taskkill /PID %%P /F >nul 2>&1
+                        )
+                    )
+                    exit /b 0
+                """
+            }
+        }
 
         stage('Run Application') {
             steps {
                 script {
+                    // Find runnable jar (exclude sources/javadoc)
                     def jarList = bat(
                         script: '@dir /b target\\*.jar | findstr /v sources | findstr /v javadoc',
                         returnStdout: true
                     ).trim().split("\\r?\\n").findAll { it?.trim() }
 
-                    if (jarList.isEmpty()) {
-                        error("No runnable JAR found!")
+                    if (!jarList || jarList.isEmpty()) {
+                        error('No runnable JAR found under target\\')
                     }
 
                     def jarFile = "target\\${jarList[0].trim()}"
                     echo "Running: ${jarFile}"
 
+                    // Start app in background, redirect logs, then wait a bit without using 'timeout'
                     bat """
-                        start /B java -jar "${jarFile}" --server.port=${APP_PORT} > app.log 2>&1
-                        timeout /t 10
+                        @echo off
+                        start /B "" java -jar "${jarFile}" --server.port=${APP_PORT} 1> app.log 2>&1
+                        rem Sleep ~10s using ping (more reliable in Jenkins than timeout)
+                        ping -n 11 127.0.0.1 >nul
                     """
                 }
             }
@@ -102,18 +107,34 @@ pipeline {
 
         stage('Health Check') {
             steps {
-                bat """
-                    curl -f http://localhost:${APP_PORT}/actuator/health || (
-                        curl -f http://localhost:${APP_PORT}/ || echo Health check failed
-                    )
-                """
+                script {
+                    // Poll health for up to 60s (12 * 5s)
+                    def ok = false
+                    for (int i = 1; i <= 12; i++) {
+                        def rc = bat(script: "curl -sf ${HEALTH_URL}", returnStatus: true)
+                        if (rc == 0) { ok = true; break }
+                        // Try root if actuator not present
+                        rc = bat(script: "curl -sf ${FALLBACK_URL}", returnStatus: true)
+                        if (rc == 0) { ok = true; break }
+                        echo "Health not ready yet... retry ${i}/12"
+                        // 5s sleep (10 pings ~9s; 6 pings ~5s)
+                        bat 'ping -n 6 127.0.0.1 >nul'
+                    }
+                    if (!ok) {
+                        echo 'Health check failed. Showing last 100 lines of app.log:'
+                        bat 'powershell -NoProfile -Command "Get-Content -Path app.log -Tail 100 | Out-String"'
+                        error('Application did not become healthy in time.')
+                    } else {
+                        echo "✅ Application is healthy on port ${APP_PORT}"
+                    }
+                }
             }
         }
     }
 
     post {
         success {
-            echo "App running at: http://localhost:${APP_PORT}"
+            echo "App is running at: http://localhost:${APP_PORT}"
         }
         always {
             archiveArtifacts artifacts: 'target/*.jar, app.log', allowEmptyArchive: true
