@@ -57,15 +57,25 @@ pipeline {
             }
         }
 
-        stage('Stop Existing Instance') {
-            steps {
-                bat """
-                    FOR /F "tokens=5" %%P IN ('netstat -aon ^| findstr :${APP_PORT} ^| findstr LISTENING') DO (
-                        taskkill /PID %%P /F
-                    )
-                """
-            }
-        }
+       stage('Stop Existing Instance') {
+    steps {
+        echo "Stopping any existing instance on port ${env.APP_PORT}..."
+        bat """
+            @echo off
+            setlocal ENABLEDELAYEDEXPANSION
+            set PORT=${APP_PORT}
+
+            rem Try to find any LISTENING process on the port; ignore when not found
+            for /f "tokens=5" %%P in ('netstat -aon ^| findstr :!PORT! ^| findstr LISTENING') do (
+                echo Killing PID %%P on port !PORT!
+                taskkill /PID %%P /F
+            )
+
+            rem Always succeed even if nothing was found
+            exit /b 0
+        """
+    }
+}
 
         stage('Run Application') {
             steps {
