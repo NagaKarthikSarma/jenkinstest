@@ -5,8 +5,8 @@ pipeline {
         // ── Change these to match your project ──────────────────────────
         GITHUB_REPO_URL   = 'https://github.com/your-username/your-springboot-repo.git'
         BRANCH_NAME       = 'main'
-        JAVA_HOME_WIN     = 'C:\Program Files\Amazon Corretto\jdk21.0.4_7\bin\java.exe'   // adjust JDK path
-        MVN_HOME          = 'C:\apache-maven-3.9.12'            // adjust Maven path (if not using wrapper)
+        JAVA_HOME_WIN     = 'C:/Program Files/Amazon Corretto/jdk21.0.4_7'  // adjust JDK path
+        MVN_HOME          = 'C:/apache-maven-3.9.12'            // adjust Maven path (if not using wrapper)
         APP_PORT          = '8081'
         // ────────────────────────────────────────────────────────────────
     }
