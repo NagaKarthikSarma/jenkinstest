@@ -78,7 +78,7 @@ pipeline {
             }
         }
 
-       stage('Run Application') {
+ stage('Run Application') {
     steps {
         script {
             // Find runnable jar (exclude sources/javadoc)
@@ -94,19 +94,19 @@ pipeline {
             def jarFile = "target\\${jarList[0].trim()}"
             echo "Running: ${jarFile}"
 
-            // Start app in background and keep the step alive indefinitely
+            // Start app and wait for it to exit. When Actuator shuts it down, this stage will end.
             bat """
                 @echo off
-                echo Starting application on port %APP_PORT% ...
-                start "" /B java -jar "${jarFile}" --server.port=%APP_PORT% 1> app.log 2>&1
+                if exist app.pid del /f /q app.pid
 
-                rem Optional: small delay to let it boot
-                ping -n 6 127.0.0.1 >nul
-
-                rem Keep this Jenkins step alive forever without requiring keyboard input
-                :keepalive
-                ping -n 6 127.0.0.1 >nul
-                goto keepalive
+                rem Start the Java app, capture PID, redirect logs, and wait for exit
+                powershell -NoProfile -Command ^
+                  "$args = '-jar', '${jarFile}', '--server.port=%APP_PORT%'; ^
+                   $p = Start-Process 'java' -ArgumentList $args -PassThru -WindowStyle Hidden ^
+                        -RedirectStandardOutput 'app.log' -RedirectStandardError 'app.log'; ^
+                   $p.Id | Out-File -FilePath 'app.pid' -Encoding ascii; ^
+                   Write-Host ('Started PID ' + $p.Id + ' on port %APP_PORT%'); ^
+                   try { Wait-Process -Id $p.Id } finally { Write-Host 'Application process exited.' }"
             """
         }
     }
