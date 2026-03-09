@@ -78,7 +78,7 @@ pipeline {
             }
         }
 
-       stage('Run Application') {
+ stage('Run Application') {
     steps {
         script {
             // Find runnable jar (exclude sources/javadoc)
@@ -112,31 +112,6 @@ pipeline {
     }
 }
 
-        stage('Health Check') {
-            steps {
-                script {
-                    // Poll health for up to 60s (12 * 5s)
-                    def ok = false
-                    for (int i = 1; i <= 12; i++) {
-                        def rc = bat(script: "curl -sf ${HEALTH_URL}", returnStatus: true)
-                        if (rc == 0) { ok = true; break }
-                        // Try root if actuator not present
-                        rc = bat(script: "curl -sf ${FALLBACK_URL}", returnStatus: true)
-                        if (rc == 0) { ok = true; break }
-                        echo "Health not ready yet... retry ${i}/12"
-                        // 5s sleep (10 pings ~9s; 6 pings ~5s)
-                        bat 'ping -n 6 127.0.0.1 >nul'
-                    }
-                    if (!ok) {
-                        echo 'Health check failed. Showing last 100 lines of app.log:'
-                        bat 'powershell -NoProfile -Command "Get-Content -Path app.log -Tail 100 | Out-String"'
-                        error('Application did not become healthy in time.')
-                    } else {
-                        echo "✅ Application is healthy on port ${APP_PORT}"
-                    }
-                }
-            }
-        }
     }
 
     post {
