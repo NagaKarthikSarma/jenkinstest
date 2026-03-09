@@ -78,32 +78,39 @@ pipeline {
             }
         }
 
-        stage('Run Application') {
-            steps {
-                script {
-                    // Find runnable jar (exclude sources/javadoc)
-                    def jarList = bat(
-                        script: '@dir /b target\\*.jar | findstr /v sources | findstr /v javadoc',
-                        returnStdout: true
-                    ).trim().split("\\r?\\n").findAll { it?.trim() }
+       stage('Run Application') {
+    steps {
+        script {
+            // Find runnable jar (exclude sources/javadoc)
+            def jarList = bat(
+                script: '@dir /b target\\*.jar | findstr /v sources | findstr /v javadoc',
+                returnStdout: true
+            ).trim().split("\\r?\\n").findAll { it?.trim() }
 
-                    if (!jarList || jarList.isEmpty()) {
-                        error('No runnable JAR found under target\\')
-                    }
-
-                    def jarFile = "target\\${jarList[0].trim()}"
-                    echo "Running: ${jarFile}"
-
-                    // Start app in background, redirect logs, then wait a bit without using 'timeout'
-                    bat """
-                        @echo off
-                        start /B "" java -jar "${jarFile}" --server.port=${APP_PORT} 1> app.log 2>&1
-                        rem Sleep ~10s using ping (more reliable in Jenkins than timeout)
-                        ping -n 11 127.0.0.1 >nul
-                    """
-                }
+            if (!jarList || jarList.isEmpty()) {
+                error('No runnable JAR found under target\\')
             }
+
+            def jarFile = "target\\${jarList[0].trim()}"
+            echo "Running: ${jarFile}"
+
+            // Start app in background and keep the step alive indefinitely
+            bat """
+                @echo off
+                echo Starting application on port %APP_PORT% ...
+                start "" /B java -jar "${jarFile}" --server.port=%APP_PORT% 1> app.log 2>&1
+
+                rem Optional: small delay to let it boot
+                ping -n 6 127.0.0.1 >nul
+
+                rem Keep this Jenkins step alive forever without requiring keyboard input
+                :keepalive
+                ping -n 6 127.0.0.1 >nul
+                goto keepalive
+            """
         }
+    }
+}
 
         stage('Health Check') {
             steps {
