@@ -77,36 +77,47 @@ pipeline {
                 """
             }
         }
-
- stage('Run Application') {
+stage('Run Application') {
     steps {
         script {
-            // Find runnable jar (exclude sources/javadoc)
+            // 1. Locate the JAR (Excluding sources/javadoc)
             def jarList = bat(
                 script: '@dir /b target\\*.jar | findstr /v sources | findstr /v javadoc',
                 returnStdout: true
             ).trim().split("\\r?\\n").findAll { it?.trim() }
 
-            if (!jarList || jarList.isEmpty()) {
+            if (!jarList) {
                 error('No runnable JAR found under target\\')
             }
 
             def jarFile = "target\\${jarList[0].trim()}"
-            echo "Running: ${jarFile}"
+            def processTitle = "Jenkins_App_${env.BUILD_ID}"
+            
+            echo "Starting ${jarFile} on port ${env.APP_PORT}..."
 
-            // Start app in background and keep the step alive indefinitely
+            // 2. Launch and Monitor
             bat """
                 @echo off
-                echo Starting application on port %APP_PORT% ...
-                start "" /B java -jar "${jarFile}" --server.port=%APP_PORT% 1> app.log 2>&1
+                :: Start the app with a specific title in the background
+                :: Redirecting output to app.log for debugging
+                start "${processTitle}" /B java -jar "${jarFile}" --server.port=${env.APP_PORT} > app.log 2>&1
 
-                rem Optional: small delay to let it boot
-                ping -n 6 127.0.0.1 >nul
+                echo Application is booting. Monitoring process: ${processTitle}
+                echo To stop this stage, trigger: http://localhost:${env.APP_PORT}/actuator/shutdown
 
-                rem Keep this Jenkins step alive forever without requiring keyboard input
-                :keepalive
-                ping -n 6 127.0.0.1 >nul
-                goto keepalive
+                :monitor
+                :: Check if the process with our unique title is still in the task list
+                tasklist /V /FI "WINDOWTITLE eq ${processTitle}" | findstr /i "java.exe" >nul
+                
+                if %ERRORLEVEL% equ 0 (
+                    :: Process still exists. Wait 10 seconds (ping -n 11) and check again.
+                    ping -n 11 127.0.0.1 >nul
+                    goto monitor
+                )
+
+                echo [INFO] Application process has terminated (Actuator shutdown detected).
+                echo [INFO] Final logs from app.log:
+                type app.log
             """
         }
     }
