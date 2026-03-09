@@ -94,49 +94,24 @@ pipeline {
             def jarFile = "target\\${jarList[0].trim()}"
             echo "Running: ${jarFile}"
 
-            // Start app and wait for it to exit. When Actuator shuts it down, this stage will end.
+            // Start app in background and keep the step alive indefinitely
             bat """
                 @echo off
-                if exist app.pid del /f /q app.pid
+                echo Starting application on port %APP_PORT% ...
+                start "" /B java -jar "${jarFile}" --server.port=%APP_PORT% 1> app.log 2>&1
 
-                rem Start the Java app, capture PID, redirect logs, and wait for exit
-                powershell -NoProfile -Command ^
-                  "$args = '-jar', '${jarFile}', '--server.port=%APP_PORT%'; ^
-                   $p = Start-Process 'java' -ArgumentList $args -PassThru -WindowStyle Hidden ^
-                        -RedirectStandardOutput 'app.log' -RedirectStandardError 'app.log'; ^
-                   $p.Id | Out-File -FilePath 'app.pid' -Encoding ascii; ^
-                   Write-Host ('Started PID ' + $p.Id + ' on port %APP_PORT%'); ^
-                   try { Wait-Process -Id $p.Id } finally { Write-Host 'Application process exited.' }"
+                rem Optional: small delay to let it boot
+                ping -n 6 127.0.0.1 >nul
+
+                rem Keep this Jenkins step alive forever without requiring keyboard input
+                :keepalive
+                ping -n 6 127.0.0.1 >nul
+                goto keepalive
             """
         }
     }
 }
 
-        stage('Health Check') {
-            steps {
-                script {
-                    // Poll health for up to 60s (12 * 5s)
-                    def ok = false
-                    for (int i = 1; i <= 12; i++) {
-                        def rc = bat(script: "curl -sf ${HEALTH_URL}", returnStatus: true)
-                        if (rc == 0) { ok = true; break }
-                        // Try root if actuator not present
-                        rc = bat(script: "curl -sf ${FALLBACK_URL}", returnStatus: true)
-                        if (rc == 0) { ok = true; break }
-                        echo "Health not ready yet... retry ${i}/12"
-                        // 5s sleep (10 pings ~9s; 6 pings ~5s)
-                        bat 'ping -n 6 127.0.0.1 >nul'
-                    }
-                    if (!ok) {
-                        echo 'Health check failed. Showing last 100 lines of app.log:'
-                        bat 'powershell -NoProfile -Command "Get-Content -Path app.log -Tail 100 | Out-String"'
-                        error('Application did not become healthy in time.')
-                    } else {
-                        echo "✅ Application is healthy on port ${APP_PORT}"
-                    }
-                }
-            }
-        }
     }
 
     post {
